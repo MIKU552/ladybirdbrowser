@@ -1,0 +1,228 @@
+name: Build Ladybird Multi-Platform
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_preset:
+        description: 'Build preset to use (e.g., default, Debug)'
+        required: true
+        default: 'default'
+
+jobs:
+  build:
+    name: Build Ladybird on ${{ matrix.os_display_name }}
+    # fail-fast: false 会确保即使一个平台的构建失败，其他平台的构建也会继续尝试
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_type: macos
+            os_runner: macos-latest # 通常带有 Xcode 15+
+            os_display_name: "macOS (Xcode Clang)"
+            artifact_name_suffix: "macOS-XcodeClang"
+          - os_type: linux
+            os_runner: ubuntu-latest
+            os_display_name: "Linux (Ubuntu Clang)"
+            clang_version: "17" # Ladybird 文档推荐 clang-17 或更高
+            artifact_name_suffix: "Linux-Clang${{ matrix.clang_version }}"
+            # 注意：Ladybird 文档也提到了 g++-13
+
+    env:
+      BUILD_PRESET_NAME: ${{ github.event.inputs.build_preset || 'default' }}
+      LADYBIRD_CHECKOUT_DIR: 'ladybird_source'
+
+    runs-on: ${{ matrix.os_runner }}
+
+    steps:
+      - name: Checkout Ladybird Browser repository
+        uses: actions/checkout@v4
+        with:
+          repository: 'LadybirdBrowser/ladybird'
+          path: ${{ env.LADYBIRD_CHECKOUT_DIR }}
+          fetch-depth: 0
+          # lfs: true # 如果 LadybirdBrowser/ladybird 仓库使用 LFS
+          # submodules: 'recursive' # 如果 LadybirdBrowser/ladybird 仓库使用子模块
+
+      # macOS Specific Setup
+      - name: Setup Environment (macOS - Xcode Clang)
+        if: matrix.os_type == 'macos'
+        id: setup-env-macos
+        run: |
+          echo "Ensuring Homebrew is available for other tools..."
+          which brew || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          if [ -d "/usr/local/bin" ]; then echo "/usr/local/bin" >> $GITHUB_PATH; fi
+          if [ -d "/opt/homebrew/bin" ]; then echo "/opt/homebrew/bin" >> $GITHUB_PATH; fi
+          BREW_PREFIX_BIN=$(brew --prefix)/bin
+          echo "$BREW_PREFIX_BIN" >> $GITHUB_PATH
+          echo "cc_path=/usr/bin/clang" >> $GITHUB_OUTPUT
+          echo "cxx_path=/usr/bin/clang++" >> $GITHUB_OUTPUT
+
+      - name: Install macOS dependencies (No Homebrew LLVM, No Qt)
+        if: matrix.os_type == 'macos'
+        run: |
+          brew update --quiet
+          brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config
+          cmake --version && ninja --version
+
+      - name: Select and Verify Xcode version (macOS)
+        if: matrix.os_type == 'macos'
+        id: xcode-select # id is specific to this job, not globally unique across matrix if same name used
+        run: |
+          echo "Available Xcode versions on runner:"
+          ls /Applications | grep Xcode || echo "No Xcode installations found"
+          CURRENT_XCODE_PATH=$(xcode-select -p)
+          echo "Currently selected Xcode path: $CURRENT_XCODE_PATH"
+          XCODE_VERSION_INFO=$(xcodebuild -version)
+          echo "$XCODE_VERSION_INFO"
+          XCODE_MAJOR_VERSION=$(echo "$XCODE_VERSION_INFO" | grep "Xcode" | sed 's/Xcode \([0-9]*\).*/\1/')
+          echo "Detected Xcode major version: $XCODE_MAJOR_VERSION"
+          if [ "$XCODE_MAJOR_VERSION" -lt 15 ]; then
+            echo "Error: Xcode version $XCODE_MAJOR_VERSION is less than the required 15."
+            exit 1
+          fi
+          /usr/bin/clang --version
+
+      # Linux Specific Setup
+      - name: Setup Environment (Linux - Clang ${{ matrix.clang_version }})
+        if: matrix.os_type == 'linux'
+        id: setup-env-linux
+        run: |
+          # 这些路径会在安装 Clang 后生效
+          echo "cc_path=/usr/bin/clang-${{ matrix.clang_version }}" >> $GITHUB_OUTPUT
+          echo "cxx_path=/usr/bin/clang++-${{ matrix.clang_version }}" >> $GITHUB_OUTPUT
+
+      - name: Install Linux dependencies and Clang ${{ matrix.clang_version }}
+        if: matrix.os_type == 'linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive # 防止 apt-get 交互
+          CLANG_VERSION_TO_INSTALL: ${{ matrix.clang_version }}
+        run: |
+          sudo apt-get update -y -q
+          # 安装基础依赖和 Qt6 (Ladybird 在 Linux 上使用 Qt)
+          # 根据 BuildInstructionsLadybird.md for Debian/Ubuntu
+          sudo apt-get install -y -q --no-install-recommends \
+            autoconf autoconf-archive automake build-essential ccache curl \
+            fonts-liberation2 git libgl1-mesa-dev nasm ninja-build pkg-config \
+            qt6-base-dev qt6-tools-dev qt6-wayland \
+            tar unzip zip wget gpg coreutils software-properties-common
+
+          # 安装指定版本的 Clang (来自 apt.llvm.org)
+          # 参考 BuildInstructionsLadybird.md 中的步骤
+          sudo wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+          CODENAME=$(lsb_release -sc)
+          LLVM_APT_LINE="deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.key] http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL main"
+          echo "$LLVM_APT_LINE" | sudo tee "/etc/apt/sources.list.d/llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL.list"
+          sudo apt-get update -y -q
+          sudo apt-get install -y -q --no-install-recommends \
+            clang-$CLANG_VERSION_TO_INSTALL lld-$CLANG_VERSION_TO_INSTALL clang-tools-$CLANG_VERSION_TO_INSTALL \
+            libstdc++-12-dev # 或者一个兼容的 libstdc++ 版本，Clang 可能需要
+
+          # 验证 CMake 版本 (Ladybird 需要 >= 3.25)
+          # ubuntu-latest runner 通常有较新的 CMake，如果不够新，需要从 Kitware 安装
+          INSTALLED_CMAKE_VERSION=$(cmake --version | head -n1 | sed 's/cmake version //')
+          echo "Installed CMake version: $INSTALLED_CMAKE_VERSION"
+          # Add CMake version check and install if needed, example:
+          # if ! dpkg --compare-versions "$INSTALLED_CMAKE_VERSION" "ge" "3.25"; then
+          #   echo "CMake version is less than 3.25. Installing from Kitware..."
+          #   sudo apt-get install -y apt-transport-https ca-certificates gnupg software-properties-common
+          #   wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+          #   echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/kitware.list
+          #   sudo apt-get update -y -q
+          #   sudo apt-get install -y -q cmake
+          #   cmake --version
+          # fi
+          
+          # 验证 Clang 版本
+          /usr/bin/clang-$CLANG_VERSION_TO_INSTALL --version
+
+      # Common Build Step (for all OS in matrix)
+      - name: Configure and Build Ladybird
+        id: build-ladybird
+        env:
+          # CC 和 CXX 会根据 matrix.os_type 在运行时设置
+          BUILD_PRESET: ${{ env.BUILD_PRESET_NAME }}
+        working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
+        run: |
+          # 根据操作系统类型设置编译器
+          CURRENT_OS_TYPE="${{ matrix.os_type }}"
+          if [ "$CURRENT_OS_TYPE" = "macos" ]; then
+            export CC="${{ steps.setup-env-macos.outputs.cc_path }}"
+            export CXX="${{ steps.setup-env-macos.outputs.cxx_path }}"
+          elif [ "$CURRENT_OS_TYPE" = "linux" ]; then
+            export CC="${{ steps.setup-env-linux.outputs.cc_path }}"
+            export CXX="${{ steps.setup-env-linux.outputs.cxx_path }}"
+          else
+            echo "Error: Unknown OS type for compiler setup: $CURRENT_OS_TYPE"
+            exit 1
+          fi
+
+          echo "--- Current Directory ---"
+          pwd
+          echo "--- Meta Directory (checking for ladybird.sh) ---"
+          ls -la Meta/
+          
+          echo "--- Compiler Information ---"
+          echo "Using CC: $CC"
+          $CC --version
+          echo "Using CXX: $CXX"
+          $CXX --version
+          
+          echo "--- Build Configuration ---"
+          echo "Using BUILD_PRESET: $BUILD_PRESET"
+          
+          echo "--- Starting Ladybird Build ---"
+          ./Meta/ladybird.sh build ladybird
+          
+          echo "--- Build Finished ---"
+          
+          # 确定实际的构建输出目录名和产物路径
+          ACTUAL_BUILD_SUBDIR="$BUILD_PRESET"
+          if [ "$BUILD_PRESET" = "default" ]; then
+            if [ -d "Build/release" ] && [ ! -d "Build/default" ]; then
+              echo "Default preset appears to use 'release' directory for output."
+              ACTUAL_BUILD_SUBDIR="release"
+            elif [ ! -d "Build/default" ] && [ ! -d "Build/release" ]; then
+               echo "Warning: Neither Build/default nor Build/release found for default preset. Assuming '$BUILD_PRESET' directory."
+            fi
+          fi
+
+          if [ ! -d "Build/$ACTUAL_BUILD_SUBDIR" ]; then
+            echo "Error: Build output subdirectory 'Build/$ACTUAL_BUILD_SUBDIR' not found!"
+            ls -la Build
+            exit 1
+          fi
+          
+          # 根据操作系统确定产物文件名
+          ARTIFACT_FILE_PATH=""
+          if [ "$CURRENT_OS_TYPE" = "macos" ]; then
+            ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird.app"
+          elif [ "$CURRENT_OS_TYPE" = "linux" ]; then
+            # Linux 上的可执行文件通常直接是 Ladybird
+            ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird" 
+          fi
+          echo "artifact_sub_path=$ARTIFACT_FILE_PATH" >> $GITHUB_OUTPUT
+          echo "Artifact path determined for upload: ./${{ env.LADYBIRD_CHECKOUT_DIR }}/$ARTIFACT_FILE_PATH"
+
+      - name: Upload Ladybird Artifact
+        if: success() && steps.build-ladybird.outputs.artifact_sub_path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ladybird-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }}
+          path: ${{ env.LADYBIRD_CHECKOUT_DIR }}/${{ steps.build-ladybird.outputs.artifact_sub_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Build Logs (Optional, on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ladybird-build-logs-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }}
+          path: |
+            ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/**/*.log
+            ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/vcpkg-manifest-install.log
+          if-no-files-found: ignore
+          retention-days: 7
