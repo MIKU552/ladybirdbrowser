@@ -1,4 +1,4 @@
-name: Build Ladybird macOS
+name: Build Ladybird macOS (with Xcode Clang)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
-    inputs: # 允许手动触发时输入预设名称
+    inputs:
       build_preset:
         description: 'Build preset to use (e.g., default, Debug)'
         required: true
@@ -14,89 +14,110 @@ on:
 
 jobs:
   build-macos:
-    name: Build Ladybird on macOS
-    runs-on: macos-latest
+    name: Build Ladybird on macOS with Xcode Clang
+    # 使用最新的 macOS runner，通常带有较新的 Xcode 版本
+    # 例如 macos-14 (通常是 macos-latest) 自带 Xcode 15.x
+    runs-on: macos-latest 
     
     env:
-      # 使用手动触发时的输入或默认值
       BUILD_PRESET_NAME: ${{ github.event.inputs.build_preset || 'default' }}
-      # 指定 Ladybird 源代码签出到的目录名
       LADYBIRD_CHECKOUT_DIR: 'ladybird_source'
 
     steps:
       - name: Checkout Ladybird Browser repository
         uses: actions/checkout@v4
         with:
-          repository: 'LadybirdBrowser/ladybird' # <--- 指定签出 Ladybird 官方仓库
-          path: ${{ env.LADYBIRD_CHECKOUT_DIR }} # <--- 签出到指定目录
-          # ref: 'main' # 可以指定分支，默认是仓库的默认分支
-          fetch-depth: 0 # 获取所有历史记录
-          # lfs: true # 如果 LadybirdBrowser/ladybird 使用 LFS，取消此行注释
-          # submodules: 'recursive' # 如果 LadybirdBrowser/ladybird 使用子模块，取消此行注释
+          repository: 'LadybirdBrowser/ladybird'
+          path: ${{ env.LADYBIRD_CHECKOUT_DIR }}
+          fetch-depth: 0 # 获取所有历史记录，某些构建脚本可能需要
+          # lfs: true # 如果 LadybirdBrowser/ladybird 仓库使用 LFS，取消此行注释
+          # submodules: 'recursive' # 如果 LadybirdBrowser/ladybird 仓库使用子模块，取消此行注释
 
-      - name: Setup Homebrew and Environment
+      - name: Setup Environment (for Xcode Clang)
         id: setup-env
         run: |
-          echo "Verifying Homebrew..."
+          echo "Ensuring Homebrew is available for other tools..."
           which brew || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           
-          echo "Adding Homebrew to PATH..."
-          if [ -d "/usr/local/bin" ]; then echo "/usr/local/bin" >> $GITHUB_PATH; fi
-          if [ -d "/opt/homebrew/bin" ]; then echo "/opt/homebrew/bin" >> $GITHUB_PATH; fi
+          echo "Adding Homebrew to PATH for other tools..."
+          if [ -d "/usr/local/bin" ]; then echo "/usr/local/bin" >> $GITHUB_PATH; fi # For Intel runners
+          if [ -d "/opt/homebrew/bin" ]; then echo "/opt/homebrew/bin" >> $GITHUB_PATH; fi # For Apple Silicon runners
 
           BREW_PREFIX_BIN=$(brew --prefix)/bin
           echo "$BREW_PREFIX_BIN" >> $GITHUB_PATH
-          echo "Homebrew prefix bin path: $BREW_PREFIX_BIN"
-
-          LLVM_BIN_PATH=$(brew --prefix llvm)/bin
-          if [ -d "$LLVM_BIN_PATH" ]; then
-            echo "$LLVM_BIN_PATH" >> $GITHUB_PATH
-            echo "LLVM bin path added: $LLVM_BIN_PATH"
-          else
-            echo "Warning: LLVM bin path not found. Will attempt to install LLVM."
-          fi
+          echo "Homebrew prefix bin path for other tools: $BREW_PREFIX_BIN"
           
-          echo "cc_path=$(brew --prefix llvm)/bin/clang" >> $GITHUB_OUTPUT
-          echo "cxx_path=$(brew --prefix llvm)/bin/clang++" >> $GITHUB_OUTPUT
+          # 设置 CC 和 CXX 指向 Xcode 的 Clang
+          # 这些是由 xcode-select 管理的标准路径
+          echo "cc_path=/usr/bin/clang" >> $GITHUB_OUTPUT
+          echo "cxx_path=/usr/bin/clang++" >> $GITHUB_OUTPUT
+          echo "Using Xcode Clang: /usr/bin/clang and /usr/bin/clang++"
 
-      - name: Install macOS dependencies (No Qt)
+      - name: Install macOS dependencies (No Homebrew LLVM, No Qt)
         run: |
           echo "Updating Homebrew..."
-          brew update
+          brew update --quiet # 安静模式，减少日志输出
           
-          echo "Installing dependencies via Homebrew (llvm for clang, no qt)..."
-          brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config llvm
+          echo "Installing dependencies via Homebrew (excluding llvm and qt)..."
+          # 根据 BuildInstructionsLadybird.md，仅安装必要的构建工具
+          # cmake, ninja, autoconf, etc.
+          brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config
           
           echo "Verifying installed tools..."
           cmake --version
           ninja --version
-          # 确保使用的是 brew 安装的 clang
-          $(brew --prefix llvm)/bin/clang --version
-          $(brew --prefix llvm)/bin/clang++ --version
 
-      - name: Select Xcode version (Informational)
+      - name: Select and Verify Xcode version
+        id: xcode-select
         run: |
-          echo "Available Xcode versions:"
+          echo "Available Xcode versions on runner:"
           ls /Applications | grep Xcode || echo "No Xcode installations found in /Applications"
-          echo "Currently selected Xcode version:"
-          xcode-select -p
-          xcodebuild -version
-          echo "System Clang version (might be different from Homebrew's):"
+          
+          # Ladybird 需要 Xcode 15 或更高版本。
+          # macos-latest (如 macos-14) 通常默认 Xcode 15.x。
+          # 如果需要，可以明确选择一个已安装的 Xcode 15+ 版本。
+          # 例如，如果 Xcode 15.3 可用:
+          #   DESIRED_XCODE_PATH="/Applications/Xcode_15.3.app"
+          #   if [ -d "$DESIRED_XCODE_PATH" ]; then
+          #     echo "Selecting Xcode: $DESIRED_XCODE_PATH"
+          #     sudo xcode-select -s "$DESIRED_XCODE_PATH"
+          #   else
+          #     echo "Warning: $DESIRED_XCODE_PATH not found. Using runner's default Xcode."
+          #   fi
+
+          CURRENT_XCODE_PATH=$(xcode-select -p)
+          echo "Currently selected Xcode path: $CURRENT_XCODE_PATH"
+          XCODE_VERSION_INFO=$(xcodebuild -version)
+          echo "$XCODE_VERSION_INFO"
+          
+          # 提取 Xcode 主版本号 (例如 15)
+          XCODE_MAJOR_VERSION=$(echo "$XCODE_VERSION_INFO" | grep "Xcode" | sed 's/Xcode \([0-9]*\).*/\1/')
+          echo "Detected Xcode major version: $XCODE_MAJOR_VERSION"
+          echo "xcode_major_version=$XCODE_MAJOR_VERSION" >> $GITHUB_OUTPUT
+
+          if [ "$XCODE_MAJOR_VERSION" -lt 15 ]; then
+            echo "Error: Xcode version $XCODE_MAJOR_VERSION is less than the required 15."
+            echo "Please ensure the GitHub Actions runner has Xcode 15 or newer, or explicitly select it."
+            exit 1
+          fi
+          
+          echo "Verifying selected Clang (should be from Xcode):"
           /usr/bin/clang --version
+          /usr/bin/clang++ --version
 
       - name: Configure and Build Ladybird
         id: build-ladybird
         env:
+          # 使用由 setup-env 步骤确定的 Xcode Clang 路径
           CC: ${{ steps.setup-env.outputs.cc_path }}
           CXX: ${{ steps.setup-env.outputs.cxx_path }}
           BUILD_PRESET: ${{ env.BUILD_PRESET_NAME }}
-        working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }} # <--- 进入签出的 Ladybird 代码目录
+        working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           echo "--- Current Directory ---"
           pwd
-          ls -la
-          echo "--- Meta Directory ---"
-          ls -la Meta/ # 确认 Meta/ladybird.sh 是否存在
+          echo "--- Meta Directory (checking for ladybird.sh) ---"
+          ls -la Meta/
           
           echo "--- Compiler Information ---"
           echo "Using CC: $CC"
@@ -106,24 +127,33 @@ jobs:
           
           echo "--- Build Configuration ---"
           echo "Using BUILD_PRESET: $BUILD_PRESET"
+          echo "Xcode major version from previous step: ${{ steps.xcode-select.outputs.xcode_major_version }}"
           
           echo "--- Starting Ladybird Build ---"
-          ./Meta/ladybird.sh build ladybird # 现在应该能找到脚本了
+          ./Meta/ladybird.sh build ladybird
           
           echo "--- Build Finished ---"
           
           # 确定实际的构建输出目录名，用于上传产物
-          # (这个逻辑可能需要根据 ladybird 项目的实际 CMakePresets.json 调整)
           ACTUAL_BUILD_SUBDIR="$BUILD_PRESET"
-          if [ "$BUILD_PRESET" = "default" ] && [ -d "Build/release" ] && [ ! -d "Build/default" ]; then
-            echo "Default preset seems to use 'release' directory."
-            ACTUAL_BUILD_SUBDIR="release"
-          elif [ ! -d "Build/$ACTUAL_BUILD_SUBDIR" ]; then
-            echo "Error: Build directory 'Build/$ACTUAL_BUILD_SUBDIR' not found!"
+          if [ "$BUILD_PRESET" = "default" ]; then
+            # 检查 'default' 预设是否实际输出到 'release' 目录
+            if [ -d "Build/release" ] && [ ! -d "Build/default" ]; then
+              echo "Default preset appears to use 'release' directory for output."
+              ACTUAL_BUILD_SUBDIR="release"
+            elif [ ! -d "Build/default" ] && [ ! -d "Build/release" ]; then
+              echo "Warning: Neither Build/default nor Build/release found for default preset. Assuming '$BUILD_PRESET' directory."
+            fi
+          fi
+
+          # 再次检查最终确定的构建子目录是否存在
+          if [ ! -d "Build/$ACTUAL_BUILD_SUBDIR" ]; then
+            echo "Error: Build output subdirectory 'Build/$ACTUAL_BUILD_SUBDIR' not found!"
+            echo "Listing contents of 'Build/' directory:"
             ls -la Build
             exit 1
           fi
-          # 产物路径是相对于 working-directory (即 LADYBIRD_CHECKOUT_DIR)
+          
           echo "artifact_sub_path=Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird.app" >> $GITHUB_OUTPUT
           echo "Artifact path determined for upload: ./${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird.app"
 
@@ -131,9 +161,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Ladybird-macOS-${{ env.BUILD_PRESET_NAME }}
-          # path 需要是相对于仓库根目录的路径，或者使用绝对路径
-          # steps.build-ladybird.outputs.artifact_sub_path 是相对于 LADYBIRD_CHECKOUT_DIR 的路径
+          name: Ladybird-macOS-XcodeClang-${{ env.BUILD_PRESET_NAME }}
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}/${{ steps.build-ladybird.outputs.artifact_sub_path }}
           if-no-files-found: error
           retention-days: 7
@@ -142,9 +170,9 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ladybird-macos-build-logs-${{ env.BUILD_PRESET_NAME }}
+          name: ladybird-macos-xcodeclang-build-logs-${{ env.BUILD_PRESET_NAME }}
           path: |
-            ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/**/*.log
+            ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/**/*.log # May need to adjust if ACTUAL_BUILD_SUBDIR logic is complex
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/vcpkg-manifest-install.log
           if-no-files-found: ignore
           retention-days: 7
