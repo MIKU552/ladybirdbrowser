@@ -23,16 +23,17 @@ jobs:
             os_runner: macos-latest # GitHub's macOS runners are typically arm64 (Apple Silicon) now
             os_display_name: "macOS (Homebrew Clang 19)"
             artifact_name_suffix: "macOS-HBClang19"
-            llvm_package: "llvm@19"
+            llvm_package: "llvm@19" # As per BuildInstructionsLadybird.md
           - os_type: linux
             os_runner: ubuntu-latest
             os_display_name: "Linux (Ubuntu Clang 17)"
-            clang_version: "17"
+            clang_version: "17" # As per C++23 capable compiler like clang-17
             artifact_name_suffix: "Linux-Clang17"
 
     env:
       BUILD_PRESET_NAME: ${{ github.event.inputs.build_preset || 'default' }}
       LADYBIRD_CHECKOUT_DIR: 'ladybird_source'
+      # VCPKG_DOWNLOADS is set dynamically in a step and cached
 
     runs-on: ${{ matrix.os_runner }}
 
@@ -40,17 +41,16 @@ jobs:
       - name: Checkout Ladybird Browser repository
         uses: actions/checkout@v4
         with:
-          repository: 'LadybirdBrowser/ladybird'
+          repository: 'LadybirdBrowser/ladybird' # Assuming this is the correct repository
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}
-          fetch-depth: 0
+          fetch-depth: 0 # Required by vcpkg for some versioning strategies
 
       - name: Set up dynamic environment variables and cache paths
         id: set-env-vars
         run: |
           VCPKG_DOWNLOADS_PATH="${{ runner.temp }}/vcpkg-downloads"
-          echo "Setting VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}"
-          echo "VCPKG_DOWNLOADS_DIR=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_OUTPUT
-          echo "VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_ENV
+          echo "VCPKG_DOWNLOADS_DIR=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_OUTPUT # For actions/cache path input
+          echo "VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_ENV      # For script access in subsequent steps
           echo "Ensuring vcpkg downloads directory exists: ${VCPKG_DOWNLOADS_PATH}"
           mkdir -p "${VCPKG_DOWNLOADS_PATH}"
           if [ -d "${VCPKG_DOWNLOADS_PATH}" ]; then
@@ -73,12 +73,10 @@ jobs:
         run: |
           echo "Ensuring Homebrew is available and its bin directory is in PATH..."
           which brew || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          # Add Homebrew's main bin directory to GITHUB_PATH
-          # brew shellenv might be another way, but this is explicit for GITHUB_PATH
           BREW_PREFIX_BIN=""
-          if [ -x "/opt/homebrew/bin/brew" ]; then # Apple Silicon
+          if [ -x "/opt/homebrew/bin/brew" ]; then # Apple Silicon default
             BREW_PREFIX_BIN="/opt/homebrew/bin"
-          elif [ -x "/usr/local/bin/brew" ]; then # Intel
+          elif [ -x "/usr/local/bin/brew" ]; then # Intel default
             BREW_PREFIX_BIN="/usr/local/bin"
           fi
           if [ -n "$BREW_PREFIX_BIN" ]; then
@@ -87,20 +85,21 @@ jobs:
           else
             echo "Warning: Could not determine Homebrew bin directory."
           fi
+          # Verify brew is now callable
           which brew || (echo "Error: Homebrew not found in PATH after setup attempt." && exit 1)
 
       - name: Install macOS dependencies and Setup Compiler (Homebrew ${{ matrix.llvm_package }})
         if: matrix.os_type == 'macos'
-        id: setup-macos-compiler # This step now sets the compiler paths as outputs
+        id: setup-macos-compiler # This step is crucial for setting macOS compiler paths
         env:
           LLVM_PACKAGE_NAME: ${{ matrix.llvm_package }}
         run: |
           brew update --quiet
-          # As per BuildInstructionsLadybird.md for macOS
+          # Dependencies from BuildInstructionsLadybird.md for macOS
           echo "Installing macOS dependencies: autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config $LLVM_PACKAGE_NAME"
           brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config "$LLVM_PACKAGE_NAME"
           
-          echo "--- Verifying installed tools ---"
+          echo "--- Verifying installed tools (CMake, Ninja) ---"
           cmake --version
           ninja --version
 
@@ -108,8 +107,9 @@ jobs:
           BREW_LLVM_PREFIX=$(brew --prefix "$LLVM_PACKAGE_NAME")
           if [ -z "$BREW_LLVM_PREFIX" ] || [ ! -d "$BREW_LLVM_PREFIX/bin" ]; then
             echo "Error: Could not find bin directory for $LLVM_PACKAGE_NAME using 'brew --prefix $LLVM_PACKAGE_NAME' (path: $BREW_LLVM_PREFIX)."
-            echo "Attempting to locate llvm installation directory..."
-            ls -lhd /opt/homebrew/opt/"$LLVM_PACKAGE_NAME" || ls -lhd /usr/local/opt/"$LLVM_PACKAGE_NAME"
+            echo "Diagnostic: Listing potential LLVM opt directories..."
+            ls -lhd /opt/homebrew/opt/"$LLVM_PACKAGE_NAME" || echo "No /opt/homebrew/opt/$LLVM_PACKAGE_NAME"
+            ls -lhd /usr/local/opt/"$LLVM_PACKAGE_NAME" || echo "No /usr/local/opt/$LLVM_PACKAGE_NAME"
             exit 1
           fi
 
@@ -118,6 +118,7 @@ jobs:
 
           if [ ! -x "$HB_CLANG" ] || [ ! -x "$HB_CLANG_PLUS_PLUS" ]; then
             echo "Error: Homebrew Clang ($HB_CLANG) or Clang++ ($HB_CLANG_PLUS_PLUS) not found or not executable in $BREW_LLVM_PREFIX/bin."
+            echo "Diagnostic: Listing contents of $BREW_LLVM_PREFIX/bin ..."
             ls -l "$BREW_LLVM_PREFIX/bin/"
             exit 1
           fi
@@ -127,9 +128,10 @@ jobs:
           echo "Found Homebrew Clang++: $HB_CLANG_PLUS_PLUS"
           "$HB_CLANG_PLUS_PLUS" --version
 
-          echo "Adding $BREW_LLVM_PREFIX/bin to GITHUB_PATH to make it available for subsequent steps if needed directly."
+          echo "Adding $BREW_LLVM_PREFIX/bin to GITHUB_PATH for general availability."
           echo "$BREW_LLVM_PREFIX/bin" >> $GITHUB_PATH
           
+          # Set outputs for CC and CXX to be used explicitly in the build step
           echo "cc_path=$HB_CLANG" >> $GITHUB_OUTPUT
           echo "cxx_path=$HB_CLANG_PLUS_PLUS" >> $GITHUB_OUTPUT
 
@@ -142,9 +144,9 @@ jobs:
           CURRENT_XCODE_PATH=$(xcode-select -p)
           echo "Currently selected Xcode path: $CURRENT_XCODE_PATH"
           xcodebuild -version
-          echo "System Clang version (for comparison, should NOT be used by build):"
-          # Check common system clang paths if 'which clang' might point to homebrew due to PATH modification
+          echo "System Clang version (for comparison, should NOT be used by the Ladybird build):"
           if [ -x "/usr/bin/clang" ]; then /usr/bin/clang --version; else echo "/usr/bin/clang not found"; fi
+
 
       # Linux Specific Setup
       - name: Setup Environment (Linux - Clang ${{ matrix.clang_version }})
@@ -159,31 +161,36 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
           CLANG_VERSION_TO_INSTALL: ${{ matrix.clang_version }}
-          CMAKE_REQUIRED_VERSION: "3.25"
+          CMAKE_REQUIRED_VERSION: "3.25" # From BuildInstructionsLadybird.md
         run: |
           sudo apt-get update -y -q
+          # Install essential tools for repository management and other basic operations first
           sudo apt-get install -y -q --no-install-recommends \
             wget gpg ca-certificates software-properties-common coreutils apt-utils curl
 
+          # CMake 3.25+ installation (as per BuildInstructionsLadybird.md for Debian/Ubuntu)
           INSTALLED_CMAKE_VERSION=$(cmake --version 2>/dev/null | head -n1 | sed 's/cmake version //g' || echo "0.0.0")
           echo "Initial CMake version: $INSTALLED_CMAKE_VERSION"
+          # Using dpkg --compare-versions for robust version comparison
           if ! dpkg --compare-versions "$INSTALLED_CMAKE_VERSION" "ge" "$CMAKE_REQUIRED_VERSION"; then
             echo "CMake version $INSTALLED_CMAKE_VERSION is less than required $CMAKE_REQUIRED_VERSION. Installing from Kitware apt repository."
             wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
             echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/kitware.list > /dev/null
             sudo apt-get update -y -q
-            sudo apt-get remove --purge -y cmake # Remove old version first
+            sudo apt-get remove --purge -y cmake # Remove old version first to avoid conflicts
             sudo apt-get install -y -q --no-install-recommends cmake
           else
             echo "CMake version $INSTALLED_CMAKE_VERSION is satisfactory."
           fi
           echo "Final CMake version:"; cmake --version
 
+          # Clang installation (as per BuildInstructionsLadybird.md, for specified version)
           sudo wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
           CODENAME=$(lsb_release -sc)
           LLVM_APT_LINE="deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.key] http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL main"
           echo "$LLVM_APT_LINE" | sudo tee "/etc/apt/sources.list.d/llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL.list" > /dev/null
           sudo apt-get update -y -q
+          # Build instructions example installs: clang, clangd, clang-tools, clang-format, clang-tidy, lld
           sudo apt-get install -y -q --no-install-recommends \
             clang-$CLANG_VERSION_TO_INSTALL \
             clangd-$CLANG_VERSION_TO_INSTALL \
@@ -192,12 +199,15 @@ jobs:
             clang-tidy-$CLANG_VERSION_TO_INSTALL \
             lld-$CLANG_VERSION_TO_INSTALL
 
+          # Install remaining dependencies from BuildInstructionsLadybird.md for Debian/Ubuntu
+          # Main list + recommended audio. CMake, wget, gpg, curl already handled/installed.
           sudo apt-get install -y -q --no-install-recommends \
             autoconf autoconf-archive automake build-essential ccache \
             fonts-liberation2 git libgl1-mesa-dev nasm ninja-build pkg-config \
             qt6-base-dev qt6-tools-dev-tools qt6-wayland \
             tar unzip zip \
-            libpulse-dev
+            libpulse-dev # Recommended audio support from BuildInstructions
+
           echo "Clang version used:"; /usr/bin/clang-$CLANG_VERSION_TO_INSTALL --version
           echo "Ninja version:"; ninja --version
 
@@ -206,19 +216,29 @@ jobs:
         id: build-ladybird
         env:
           BUILD_PRESET: ${{ env.BUILD_PRESET_NAME }}
+          # For macOS, attempt to set a modern deployment target.
+          # NSToolbar's setAllowsDisplayModeCustomization: requires macOS 11.0+.
+          # Setting to 12.0 (Monterey) as a reasonable modern baseline.
+          CMAKE_OSX_DEPLOYMENT_TARGET: "12.0"
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           CURRENT_OS_TYPE="${{ matrix.os_type }}"
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             export CC="${{ steps.setup-macos-compiler.outputs.cc_path }}"
             export CXX="${{ steps.setup-macos-compiler.outputs.cxx_path }}"
-            # Verification
+            
+            # Explicitly export CMAKE_OSX_DEPLOYMENT_TARGET for CMake to potentially pick up
+            echo "Setting macOS deployment target to: $CMAKE_OSX_DEPLOYMENT_TARGET"
+            export CMAKE_OSX_DEPLOYMENT_TARGET 
+
+            # Verification that CC and CXX are set and point to the expected Homebrew LLVM
             if [ -z "$CC" ] || [ -z "$CXX" ]; then
-              echo "Error: CC or CXX is not set for macOS."
-              echo "CC: $CC"
-              echo "CXX: $CXX"
+              echo "Error: CC or CXX is not set for macOS after attempting to use step outputs."
+              echo "CC value: '$CC'"
+              echo "CXX value: '$CXX'"
               exit 1
             fi
+            # This check relies on matrix.llvm_package being available here, ensure it is or hardcode llvm@19
             EXPECTED_LLVM_PREFIX=$(brew --prefix "${{ matrix.llvm_package }}")
             if [[ "$CC" != "$EXPECTED_LLVM_PREFIX/bin/clang" ]]; then
               echo "Error: CC ($CC) is not pointing to the expected Homebrew Clang path ($EXPECTED_LLVM_PREFIX/bin/clang)."
@@ -239,13 +259,15 @@ jobs:
           echo "--- Ladybird Script Location ---"; ls -la Meta/ladybird.sh
           echo "--- Compiler Information ---"
           echo "Using CC: $CC"
-          $CC --version || { echo "Error: Failed to get CC version. CC might be invalid or not found."; exit 1; }
+          $CC --version || { echo "Error: Failed to get CC version. CC ('$CC') might be invalid or not found."; exit 1; }
           echo "Using CXX: $CXX"
-          $CXX --version || { echo "Error: Failed to get CXX version. CXX might be invalid or not found."; exit 1; }
-          echo "--- CMake Version ---"
-          cmake --version
-          echo "--- Ninja Version ---"
-          ninja --version
+          $CXX --version || { echo "Error: Failed to get CXX version. CXX ('$CXX') might be invalid or not found."; exit 1; }
+          
+          if [ "$CURRENT_OS_TYPE" = "macos" ]; then
+            echo "macOS Deployment Target (from env to be used by CMake): $CMAKE_OSX_DEPLOYMENT_TARGET"
+          fi
+          echo "--- CMake Version (tool) ---"; cmake --version
+          echo "--- Ninja Version (tool) ---"; ninja --version
           echo "--- Build Configuration ---"
           echo "Using BUILD_PRESET: $BUILD_PRESET"
           echo "Verifying VCPKG_DOWNLOADS env var before build: $VCPKG_DOWNLOADS"
@@ -257,34 +279,38 @@ jobs:
 
           echo "--- Starting Ladybird Build ---"
           # The ladybird.sh script should respect CC and CXX environment variables for CMake.
+          # CMake may also pick up CMAKE_OSX_DEPLOYMENT_TARGET from the environment.
           ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
           
+          # Determine artifact subdirectory based on build preset
           ACTUAL_BUILD_SUBDIR="$BUILD_PRESET"
-          if [ "$BUILD_PRESET" = "default" ]; then
+          if [ "$BUILD_PRESET" = "default" ]; then # Default preset often maps to 'release'
             if [ -d "Build/release" ]; then
               ACTUAL_BUILD_SUBDIR="release"
-            elif [ -d "Build/debug" ]; then
+            elif [ -d "Build/debug" ]; then # Or 'debug' in some configurations
                ACTUAL_BUILD_SUBDIR="debug"
-            elif [ ! -d "Build/default" ]; then
-               echo "Warning: Neither Build/release, Build/debug, nor Build/default found for default preset. Using '$BUILD_PRESET'."
+            elif [ ! -d "Build/default" ]; then # Fallback if no standard dir and no 'default' dir
+               echo "Warning: Neither Build/release, Build/debug, nor Build/default found for default preset. Using '$BUILD_PRESET' as subdirectory name."
             fi
           fi
 
+          # Verify build output directory exists
           if [ ! -d "Build/$ACTUAL_BUILD_SUBDIR" ]; then
             echo "Error: Build output subdirectory 'Build/$ACTUAL_BUILD_SUBDIR' not found!"
             echo "Listing Build directory contents:"; ls -la Build; exit 1
           fi
           
+          # Determine artifact path based on OS
           ARTIFACT_FILE_PATH=""
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird.app"
           elif [ "$CURRENT_OS_TYPE" = "linux" ]; then
             ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird" 
           fi
-          # Output for artifact upload path
+
+          # Set outputs for artifact upload and log collection
           echo "artifact_sub_path=$ARTIFACT_FILE_PATH" >> $GITHUB_OUTPUT
-          # Output for build log path
           echo "ACTUAL_BUILD_SUBDIR_FOR_LOGS=$ACTUAL_BUILD_SUBDIR" >> $GITHUB_OUTPUT
           echo "Artifact path determined for upload: ./${{ env.LADYBIRD_CHECKOUT_DIR }}/$ARTIFACT_FILE_PATH"
 
@@ -294,18 +320,18 @@ jobs:
         with:
           name: Ladybird-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }}
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}/${{ steps.build-ladybird.outputs.artifact_sub_path }}
-          if-no-files-found: error
+          if-no-files-found: error # Fail the workflow if the artifact isn't found
           retention-days: 7
 
       - name: Upload Build Logs on failure
-        if: failure()
+        if: failure() # Always run this step on failure of previous steps in the job
         uses: actions/upload-artifact@v4
         with:
           name: ladybird-build-logs-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }}
+          # Attempt to capture logs from the determined build subdirectory, or common fallbacks
           path: |
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ steps.build-ladybird.outputs.ACTUAL_BUILD_SUBDIR_FOR_LOGS }}/**/*.log
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ steps.build-ladybird.outputs.ACTUAL_BUILD_SUBDIR_FOR_LOGS }}/vcpkg-manifest-install.log
-            # Fallback paths if ACTUAL_BUILD_SUBDIR_FOR_LOGS wasn't set or was unexpected
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/**/*.log
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ env.BUILD_PRESET_NAME }}/vcpkg-manifest-install.log
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/release/**/*.log
@@ -313,5 +339,5 @@ jobs:
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/debug/**/*.log
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/debug/vcpkg-manifest-install.log
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/**/*.log
-          if-no-files-found: ignore
+          if-no-files-found: ignore # Don't fail if some log paths don't exist
           retention-days: 7
