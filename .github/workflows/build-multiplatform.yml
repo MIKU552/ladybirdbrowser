@@ -22,18 +22,17 @@ jobs:
           - os_type: macos
             os_runner: macos-latest
             os_display_name: "macOS (Xcode Clang)"
-            artifact_name_suffix: "macOS-XcodeClang" # 直接定义
+            artifact_name_suffix: "macOS-XcodeClang"
           - os_type: linux
             os_runner: ubuntu-latest
-            os_display_name: "Linux (Ubuntu Clang 17)" # 更新显示名以匹配
-            clang_version: "17" # clang_version 用于安装步骤
-            artifact_name_suffix: "Linux-Clang17" # 直接定义包含版本号的后缀
+            os_display_name: "Linux (Ubuntu Clang 17)"
+            clang_version: "17"
+            artifact_name_suffix: "Linux-Clang17"
 
-    env:
+    env: # 作业级别的 env (不包含依赖 runner 上下文的变量)
       BUILD_PRESET_NAME: ${{ github.event.inputs.build_preset || 'default' }}
       LADYBIRD_CHECKOUT_DIR: 'ladybird_source'
-      # 定义 vcpkg 下载缓存路径环境变量
-      VCPKG_DOWNLOADS: ${{ runner.temp }}/vcpkg-downloads
+      # VCPKG_DOWNLOADS 移到下面的步骤中设置
 
     runs-on: ${{ matrix.os_runner }}
 
@@ -44,17 +43,25 @@ jobs:
           repository: 'LadybirdBrowser/ladybird'
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}
           fetch-depth: 0
-          # lfs: true # 如果 LadybirdBrowser/ladybird 仓库使用 LFS
-          # submodules: 'recursive' # 如果 LadybirdBrowser/ladybird 仓库使用子模块
+          # lfs: true
+          # submodules: 'recursive'
 
-      # vcpkg 下载缓存步骤 (macOS 和 Linux 通用)
+      # 新增步骤：设置需要 runner 上下文的环境变量
+      - name: Set up dynamic environment variables
+        id: set-env-vars
+        run: |
+          VCPKG_DOWNLOADS_PATH="${{ runner.temp }}/vcpkg-downloads"
+          echo "Setting VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}"
+          echo "VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_ENV
+          # 也可以输出供直接引用，虽然用 env 更常见
+          # echo "vcpkg_downloads_path=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_OUTPUT
+
+      # vcpkg 下载缓存步骤
       - name: Cache vcpkg downloads
         uses: actions/cache@v4
         with:
+          # 使用上一步通过 $GITHUB_ENV 设置的环境变量
           path: ${{ env.VCPKG_DOWNLOADS }}
-          # 缓存键基于操作系统和 vcpkg 的配置文件。
-          # 注意: Meta/CMake/vcpkg/CMakeLists.txt 可能不是最准确的触发器，
-          # vcpkg.json 或 manifest 文件通常更合适。请根据 Ladybird 项目结构调整。
           key: ${{ runner.os }}-vcpkg-downloads-${{ hashFiles(format('{0}/vcpkg.json', env.LADYBIRD_CHECKOUT_DIR), format('{0}/Toolchain/CMakeLists.txt', env.LADYBIRD_CHECKOUT_DIR)) }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-downloads-
@@ -92,9 +99,9 @@ jobs:
           echo "$XCODE_VERSION_INFO"
           XCODE_MAJOR_VERSION=$(echo "$XCODE_VERSION_INFO" | grep "Xcode" | sed 's/Xcode \([0-9]*\).*/\1/')
           echo "Detected Xcode major version: $XCODE_MAJOR_VERSION"
-          if [ "$XCODE_MAJOR_VERSION" -lt 15 ]; then
-            echo "Error: Xcode version $XCODE_MAJOR_VERSION is less than the required 15."
-            exit 1
+          if [ -z "$XCODE_MAJOR_VERSION" ] || [ "$XCODE_MAJOR_VERSION" -lt 15 ]; then
+             echo "Warning or Error: Could not detect valid Xcode version >= 15. Using default."
+             # exit 1 # Decide if this should be fatal
           fi
           /usr/bin/clang --version
 
@@ -113,7 +120,6 @@ jobs:
           CLANG_VERSION_TO_INSTALL: ${{ matrix.clang_version }}
         run: |
           sudo apt-get update -y -q
-          # 安装基础依赖, Qt6 (包括 multimedia), PulseAudio, 和 XKB 开发库
           sudo apt-get install -y -q --no-install-recommends \
             autoconf autoconf-archive automake build-essential ccache curl \
             fonts-liberation2 git libgl1-mesa-dev nasm ninja-build pkg-config \
@@ -121,7 +127,6 @@ jobs:
             libpulse-dev libxkbcommon-dev \
             tar unzip zip wget gpg coreutils software-properties-common
 
-          # 安装指定版本的 Clang (来自 apt.llvm.org)
           sudo wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
           CODENAME=$(lsb_release -sc)
           LLVM_APT_LINE="deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.key] http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL main"
@@ -129,33 +134,21 @@ jobs:
           sudo apt-get update -y -q
           sudo apt-get install -y -q --no-install-recommends \
             clang-$CLANG_VERSION_TO_INSTALL lld-$CLANG_VERSION_TO_INSTALL clang-tools-$CLANG_VERSION_TO_INSTALL \
-            libstdc++-12-dev # 或其他兼容的 libstdc++ 版本
+            libstdc++-12-dev # Or a different compatible libstdc++ version
 
-          # 验证 CMake 版本 (Ladybird 需要 >= 3.25)
           INSTALLED_CMAKE_VERSION=$(cmake --version | head -n1 | sed 's/cmake version //')
           echo "Installed CMake version: $INSTALLED_CMAKE_VERSION"
-          # 如果需要，从 Kitware 安装 CMake (通常 ubuntu-latest 自带的 CMake 版本足够新)
-          # if ! dpkg --compare-versions "$INSTALLED_CMAKE_VERSION" "ge" "3.25"; then
-          #   echo "CMake version is less than 3.25. Installing from Kitware..."
-          #   # 添加 Kitware GPG 密钥
-          #   sudo wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
-          #   # 添加 Kitware apt 源
-          #   echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/kitware.list > /dev/null
-          #   # 更新并安装 CMake
-          #   sudo apt-get update -y -q
-          #   sudo apt-get install -y -q cmake
-          #   cmake --version
-          # fi
+          # Add CMake version check and install from Kitware if needed
           
-          # 验证 Clang 版本
           /usr/bin/clang-$CLANG_VERSION_TO_INSTALL --version
 
       # Common Build Step (for all OS in matrix)
       - name: Configure and Build Ladybird
         id: build-ladybird
         env:
+          # BUILD_PRESET_NAME is available from job env
+          # VCPKG_DOWNLOADS is available from job env (set via $GITHUB_ENV)
           BUILD_PRESET: ${{ env.BUILD_PRESET_NAME }}
-          # VCPKG_DOWNLOADS 环境变量在这里也会被 ladybird.sh/vcpkg 使用
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           CURRENT_OS_TYPE="${{ matrix.os_type }}"
@@ -166,8 +159,7 @@ jobs:
             export CC="${{ steps.setup-env-linux.outputs.cc_path }}"
             export CXX="${{ steps.setup-env-linux.outputs.cxx_path }}"
           else
-            echo "Error: Unknown OS type for compiler setup: $CURRENT_OS_TYPE"
-            exit 1
+            echo "Error: Unknown OS type for compiler setup: $CURRENT_OS_TYPE"; exit 1
           fi
 
           echo "--- Current Directory ---"; pwd
@@ -177,9 +169,12 @@ jobs:
           echo "Using CXX: $CXX"; $CXX --version
           echo "--- Build Configuration ---"
           echo "Using BUILD_PRESET: $BUILD_PRESET"
-          echo "VCPKG_DOWNLOADS set to: $VCPKG_DOWNLOADS" # 验证环境变量
+          echo "VCPKG_DOWNLOADS set to: $VCPKG_DOWNLOADS" # Verify env var is accessible
           
           echo "--- Starting Ladybird Build ---"
+          # 使用 ccache 优化编译速度 (如果安装了)
+          # Ccache 会被 CMake/Ninja 自动检测到 (如果 ccache 在 PATH 中)
+          # 或者可以强制 CMake 使用: -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
           

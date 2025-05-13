@@ -21,9 +21,7 @@ jobs:
       with:
         repository: 'LadybirdBrowser/ladybird' # Explicitly check out the Ladybird repository
         submodules: 'recursive'                # Important for Ladybird's dependencies
-        # path: 'ladybird_code'                # Optional: checkout into a subfolder named 'ladybird_code'
-                                               # If you use 'path', adjust subsequent script paths and working_directory accordingly.
-                                               # For now, it checks out to the workspace root.
+        # path: 'ladybird_code'                # Optional: checkout into a subfolder. If used, adjust script paths.
 
     - name: Diagnostic: List files after checkout
       run: |
@@ -63,8 +61,6 @@ jobs:
       run: |
         echo "Attempting to run ladybird.sh from: ${{ github.workspace }}/Meta/ladybird.sh"
         chmod +x ${{ github.workspace }}/Meta/ladybird.sh
-        # This assumes ladybird.sh and its CMake scripts correctly handle being run from the workspace root
-        # where the Ladybird code has been checked out.
         ${{ github.workspace }}/Meta/ladybird.sh build ladybird # Adjust if 'ladybird' is not the correct target or if no target is needed.
 
     - name: Archive Linux build artifacts
@@ -85,7 +81,7 @@ jobs:
       with:
         repository: 'LadybirdBrowser/ladybird' # Explicitly check out the Ladybird repository
         submodules: 'recursive'                # Important for Ladybird's dependencies
-        # path: 'ladybird_code'                # Optional: checkout into a subfolder. Adjust paths if used.
+        # path: 'ladybird_code'                # Optional: checkout into a subfolder. If used, adjust script paths.
 
     - name: Diagnostic: List files after checkout
       run: |
