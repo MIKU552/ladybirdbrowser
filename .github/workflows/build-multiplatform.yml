@@ -29,7 +29,7 @@ jobs:
             clang_version: "17"
             artifact_name_suffix: "Linux-Clang17"
 
-    env: # 作业级别的 env (不包含依赖 runner 上下文的变量)
+    env:
       BUILD_PRESET_NAME: ${{ github.event.inputs.build_preset || 'default' }}
       LADYBIRD_CHECKOUT_DIR: 'ladybird_source'
       # VCPKG_DOWNLOADS 移到下面的步骤中设置
@@ -43,25 +43,27 @@ jobs:
           repository: 'LadybirdBrowser/ladybird'
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}
           fetch-depth: 0
-          # lfs: true
-          # submodules: 'recursive'
+          lfs: true
+          submodules: 'recursive'
 
-      # 新增步骤：设置需要 runner 上下文的环境变量
-      - name: Set up dynamic environment variables
+      # 设置需要 runner 上下文的环境变量，并创建缓存目录
+      - name: Set up dynamic environment variables and cache paths
         id: set-env-vars
         run: |
           VCPKG_DOWNLOADS_PATH="${{ runner.temp }}/vcpkg-downloads"
           echo "Setting VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}"
           echo "VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_ENV
-          # 也可以输出供直接引用，虽然用 env 更常见
-          # echo "vcpkg_downloads_path=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_OUTPUT
+
+          echo "Ensuring vcpkg downloads directory exists: ${VCPKG_DOWNLOADS_PATH}"
+          # 确保目录存在 -p 选项确保如果目录已存在也不会报错
+          mkdir -p "${VCPKG_DOWNLOADS_PATH}"
 
       # vcpkg 下载缓存步骤
       - name: Cache vcpkg downloads
         uses: actions/cache@v4
         with:
-          # 使用上一步通过 $GITHUB_ENV 设置的环境变量
-          path: ${{ env.VCPKG_DOWNLOADS }}
+          path: ${{ env.VCPKG_DOWNLOADS }} # 使用上一步设置的环境变量
+          # 调整缓存键以获得更好的匹配，例如使用 vcpkg.json 和 Toolchain CMakeLists
           key: ${{ runner.os }}-vcpkg-downloads-${{ hashFiles(format('{0}/vcpkg.json', env.LADYBIRD_CHECKOUT_DIR), format('{0}/Toolchain/CMakeLists.txt', env.LADYBIRD_CHECKOUT_DIR)) }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-downloads-
@@ -101,7 +103,7 @@ jobs:
           echo "Detected Xcode major version: $XCODE_MAJOR_VERSION"
           if [ -z "$XCODE_MAJOR_VERSION" ] || [ "$XCODE_MAJOR_VERSION" -lt 15 ]; then
              echo "Warning or Error: Could not detect valid Xcode version >= 15. Using default."
-             # exit 1 # Decide if this should be fatal
+             # exit 1 # Consider if this should be fatal
           fi
           /usr/bin/clang --version
 
@@ -146,9 +148,8 @@ jobs:
       - name: Configure and Build Ladybird
         id: build-ladybird
         env:
-          # BUILD_PRESET_NAME is available from job env
-          # VCPKG_DOWNLOADS is available from job env (set via $GITHUB_ENV)
           BUILD_PRESET: ${{ env.BUILD_PRESET_NAME }}
+          # VCPKG_DOWNLOADS is available via $GITHUB_ENV
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           CURRENT_OS_TYPE="${{ matrix.os_type }}"
@@ -172,9 +173,6 @@ jobs:
           echo "VCPKG_DOWNLOADS set to: $VCPKG_DOWNLOADS" # Verify env var is accessible
           
           echo "--- Starting Ladybird Build ---"
-          # 使用 ccache 优化编译速度 (如果安装了)
-          # Ccache 会被 CMake/Ninja 自动检测到 (如果 ccache 在 PATH 中)
-          # 或者可以强制 CMake 使用: -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
           
