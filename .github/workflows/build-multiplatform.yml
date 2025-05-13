@@ -98,7 +98,7 @@ jobs:
           # Dependencies from BuildInstructionsLadybird.md for macOS
           echo "Installing macOS dependencies: autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config $LLVM_PACKAGE_NAME"
           brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config "$LLVM_PACKAGE_NAME"
-          
+
           echo "--- Verifying installed tools (CMake, Ninja) ---"
           cmake --version
           ninja --version
@@ -122,7 +122,7 @@ jobs:
             ls -l "$BREW_LLVM_PREFIX/bin/"
             exit 1
           fi
-          
+
           echo "Found Homebrew Clang: $HB_CLANG"
           "$HB_CLANG" --version
           echo "Found Homebrew Clang++: $HB_CLANG_PLUS_PLUS"
@@ -130,7 +130,7 @@ jobs:
 
           echo "Adding $BREW_LLVM_PREFIX/bin to GITHUB_PATH for general availability."
           echo "$BREW_LLVM_PREFIX/bin" >> $GITHUB_PATH
-          
+
           # Set outputs for CC and CXX to be used explicitly in the build step
           echo "cc_path=$HB_CLANG" >> $GITHUB_OUTPUT
           echo "cxx_path=$HB_CLANG_PLUS_PLUS" >> $GITHUB_OUTPUT
@@ -185,19 +185,23 @@ jobs:
           echo "Final CMake version:"; cmake --version
 
           # Clang installation (as per BuildInstructionsLadybird.md, for specified version)
+          # Also install Clang's own C++ standard library (libc++)
           sudo wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
           CODENAME=$(lsb_release -sc)
           LLVM_APT_LINE="deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.key] http://apt.llvm.org/$CODENAME/ llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL main"
           echo "$LLVM_APT_LINE" | sudo tee "/etc/apt/sources.list.d/llvm-toolchain-$CODENAME-$CLANG_VERSION_TO_INSTALL.list" > /dev/null
           sudo apt-get update -y -q
           # Build instructions example installs: clang, clangd, clang-tools, clang-format, clang-tidy, lld
+          # Adding libc++-dev and libc++abi-dev for the corresponding Clang version
           sudo apt-get install -y -q --no-install-recommends \
             clang-$CLANG_VERSION_TO_INSTALL \
             clangd-$CLANG_VERSION_TO_INSTALL \
             clang-tools-$CLANG_VERSION_TO_INSTALL \
             clang-format-$CLANG_VERSION_TO_INSTALL \
             clang-tidy-$CLANG_VERSION_TO_INSTALL \
-            lld-$CLANG_VERSION_TO_INSTALL
+            lld-$CLANG_VERSION_TO_INSTALL \
+            libc++-$CLANG_VERSION_TO_INSTALL-dev \
+            libc++abi-$CLANG_VERSION_TO_INSTALL-dev
 
           # Install remaining dependencies from BuildInstructionsLadybird.md for Debian/Ubuntu
           # Main list + recommended audio. CMake, wget, gpg, curl already handled/installed.
@@ -226,10 +230,10 @@ jobs:
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             export CC="${{ steps.setup-macos-compiler.outputs.cc_path }}"
             export CXX="${{ steps.setup-macos-compiler.outputs.cxx_path }}"
-            
+
             # Explicitly export CMAKE_OSX_DEPLOYMENT_TARGET for CMake to potentially pick up
             echo "Setting macOS deployment target to: $CMAKE_OSX_DEPLOYMENT_TARGET"
-            export CMAKE_OSX_DEPLOYMENT_TARGET 
+            export CMAKE_OSX_DEPLOYMENT_TARGET
 
             # Verification that CC and CXX are set and point to the expected Homebrew LLVM
             if [ -z "$CC" ] || [ -z "$CXX" ]; then
@@ -238,7 +242,7 @@ jobs:
               echo "CXX value: '$CXX'"
               exit 1
             fi
-            # This check relies on matrix.llvm_package being available here, ensure it is or hardcode llvm@19
+            # This check relies on matrix.llvm_package being available here
             EXPECTED_LLVM_PREFIX=$(brew --prefix "${{ matrix.llvm_package }}")
             if [[ "$CC" != "$EXPECTED_LLVM_PREFIX/bin/clang" ]]; then
               echo "Error: CC ($CC) is not pointing to the expected Homebrew Clang path ($EXPECTED_LLVM_PREFIX/bin/clang)."
@@ -262,7 +266,7 @@ jobs:
           $CC --version || { echo "Error: Failed to get CC version. CC ('$CC') might be invalid or not found."; exit 1; }
           echo "Using CXX: $CXX"
           $CXX --version || { echo "Error: Failed to get CXX version. CXX ('$CXX') might be invalid or not found."; exit 1; }
-          
+
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             echo "macOS Deployment Target (from env to be used by CMake): $CMAKE_OSX_DEPLOYMENT_TARGET"
           fi
@@ -282,7 +286,7 @@ jobs:
           # CMake may also pick up CMAKE_OSX_DEPLOYMENT_TARGET from the environment.
           ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
-          
+
           # Determine artifact subdirectory based on build preset
           ACTUAL_BUILD_SUBDIR="$BUILD_PRESET"
           if [ "$BUILD_PRESET" = "default" ]; then # Default preset often maps to 'release'
@@ -300,13 +304,13 @@ jobs:
             echo "Error: Build output subdirectory 'Build/$ACTUAL_BUILD_SUBDIR' not found!"
             echo "Listing Build directory contents:"; ls -la Build; exit 1
           fi
-          
+
           # Determine artifact path based on OS
           ARTIFACT_FILE_PATH=""
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird.app"
           elif [ "$CURRENT_OS_TYPE" = "linux" ]; then
-            ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird" 
+            ARTIFACT_FILE_PATH="Build/$ACTUAL_BUILD_SUBDIR/bin/Ladybird"
           fi
 
           # Set outputs for artifact upload and log collection
