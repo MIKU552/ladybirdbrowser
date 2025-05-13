@@ -21,8 +21,9 @@ jobs:
         include:
           - os_type: macos
             os_runner: macos-latest
-            os_display_name: "macOS (Xcode Clang)"
-            artifact_name_suffix: "macOS-XcodeClang"
+            os_display_name: "macOS (Homebrew Clang 19)" # 更新显示名称
+            artifact_name_suffix: "macOS-HBClang19"      # 更新后缀
+            llvm_package: "llvm@19"                      # 使用文档指定的 llvm@19
           - os_type: linux
             os_runner: ubuntu-latest
             os_display_name: "Linux (Ubuntu Clang 17)"
@@ -32,7 +33,7 @@ jobs:
     env:
       BUILD_PRESET_NAME: ${{ github.event.inputs.build_preset || 'default' }}
       LADYBIRD_CHECKOUT_DIR: 'ladybird_source'
-      # VCPKG_DOWNLOADS 移到下面的步骤中设置
+      # VCPKG_DOWNLOADS 在步骤中设置
 
     runs-on: ${{ matrix.os_runner }}
 
@@ -43,53 +44,84 @@ jobs:
           repository: 'LadybirdBrowser/ladybird'
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}
           fetch-depth: 0
-          lfs: true
-          submodules: 'recursive'
+          # lfs: true
+          # submodules: 'recursive'
 
-      # 设置需要 runner 上下文的环境变量，并创建缓存目录
       - name: Set up dynamic environment variables and cache paths
         id: set-env-vars
         run: |
           VCPKG_DOWNLOADS_PATH="${{ runner.temp }}/vcpkg-downloads"
           echo "Setting VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}"
           echo "VCPKG_DOWNLOADS=${VCPKG_DOWNLOADS_PATH}" >> $GITHUB_ENV
-
           echo "Ensuring vcpkg downloads directory exists: ${VCPKG_DOWNLOADS_PATH}"
-          # 确保目录存在 -p 选项确保如果目录已存在也不会报错
           mkdir -p "${VCPKG_DOWNLOADS_PATH}"
+          if [ -d "${VCPKG_DOWNLOADS_PATH}" ]; then
+            echo "Verified directory exists: ${VCPKG_DOWNLOADS_PATH}"
+          else
+            echo "Error: Failed to create directory: ${VCPKG_DOWNLOADS_PATH}"; exit 1
+          fi
 
-      # vcpkg 下载缓存步骤
       - name: Cache vcpkg downloads
         uses: actions/cache@v4
         with:
-          path: ${{ env.VCPKG_DOWNLOADS }} # 使用上一步设置的环境变量
-          # 调整缓存键以获得更好的匹配，例如使用 vcpkg.json 和 Toolchain CMakeLists
+          path: ${{ env.VCPKG_DOWNLOADS }}
           key: ${{ runner.os }}-vcpkg-downloads-${{ hashFiles(format('{0}/vcpkg.json', env.LADYBIRD_CHECKOUT_DIR), format('{0}/Toolchain/CMakeLists.txt', env.LADYBIRD_CHECKOUT_DIR)) }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-downloads-
 
-      # macOS Specific Setup
-      - name: Setup Environment (macOS - Xcode Clang)
+      # macOS Specific Setup (Using Homebrew llvm@19)
+      - name: Setup Environment (macOS - Homebrew Clang from ${{ matrix.llvm_package }})
         if: matrix.os_type == 'macos'
         id: setup-env-macos
         run: |
-          echo "Ensuring Homebrew is available for other tools..."
+          echo "Ensuring Homebrew is available..."
           which brew || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           if [ -d "/usr/local/bin" ]; then echo "/usr/local/bin" >> $GITHUB_PATH; fi
           if [ -d "/opt/homebrew/bin" ]; then echo "/opt/homebrew/bin" >> $GITHUB_PATH; fi
           BREW_PREFIX_BIN=$(brew --prefix)/bin
           echo "$BREW_PREFIX_BIN" >> $GITHUB_PATH
-          echo "cc_path=/usr/bin/clang" >> $GITHUB_OUTPUT
-          echo "cxx_path=/usr/bin/clang++" >> $GITHUB_OUTPUT
 
-      - name: Install macOS dependencies (No Homebrew LLVM, No Qt)
+          # Add paths for the specified llvm package from Homebrew
+          LLVM_PACKAGE_NAME="${{ matrix.llvm_package }}"
+          LLVM_PREFIX=$(brew --prefix "$LLVM_PACKAGE_NAME")
+          if [ -z "$LLVM_PREFIX" ]; then
+             # 如果 brew --prefix 失败 (可能因为包还没安装), 尝试默认路径
+             echo "Warning: brew --prefix $LLVM_PACKAGE_NAME failed, attempting default path."
+             if [[ "$LLVM_PACKAGE_NAME" == "llvm" ]]; then # 最新版 llvm 通常链接到 /opt/homebrew/opt/llvm 或 /usr/local/opt/llvm
+                LLVM_PREFIX=$(brew --prefix)/opt/llvm || LLVM_PREFIX="/usr/local/opt/llvm"
+             else # 带版本的 llvm 通常在 /opt/homebrew/opt/llvm@XX 或 /usr/local/opt/llvm@XX
+                LLVM_PREFIX=$(brew --prefix)/opt/"$LLVM_PACKAGE_NAME" || LLVM_PREFIX="/usr/local/opt/$LLVM_PACKAGE_NAME"
+             fi
+          fi
+          
+          if [ -d "$LLVM_PREFIX/bin" ]; then
+            echo "Adding $LLVM_PREFIX/bin to PATH"
+            echo "$LLVM_PREFIX/bin" >> $GITHUB_PATH
+            echo "cc_path=$LLVM_PREFIX/bin/clang" >> $GITHUB_OUTPUT
+            echo "cxx_path=$LLVM_PREFIX/bin/clang++" >> $GITHUB_OUTPUT
+          else
+             echo "Error: Could not find bin directory for $LLVM_PACKAGE_NAME at $LLVM_PREFIX/bin after attempting install."
+             exit 1
+          fi
+
+      - name: Install macOS dependencies (Using Homebrew ${{ matrix.llvm_package }}, No Qt)
         if: matrix.os_type == 'macos'
         run: |
           brew update --quiet
-          brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config
+          # 安装构建工具和指定的 LLVM 包 (llvm@19)
+          brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config ${{ matrix.llvm_package }}
           cmake --version && ninja --version
+          # 验证安装的 clang 版本 (需要从 setup-env-macos 获取路径)
+          CLANG_PATH=$(brew --prefix ${{ matrix.llvm_package }})/bin/clang
+          if [ -f "$CLANG_PATH" ]; then
+            echo "Verifying Clang from Homebrew:"
+            "$CLANG_PATH" --version
+          else
+            echo "Warning: Could not find clang at $CLANG_PATH to verify version."
+          fi
 
-      - name: Select and Verify Xcode version (macOS)
+
+      - name: Select and Verify Xcode version (macOS - Informational)
         if: matrix.os_type == 'macos'
         id: xcode-select-macos
         run: |
@@ -97,15 +129,7 @@ jobs:
           ls /Applications | grep Xcode || echo "No Xcode installations found"
           CURRENT_XCODE_PATH=$(xcode-select -p)
           echo "Currently selected Xcode path: $CURRENT_XCODE_PATH"
-          XCODE_VERSION_INFO=$(xcodebuild -version)
-          echo "$XCODE_VERSION_INFO"
-          XCODE_MAJOR_VERSION=$(echo "$XCODE_VERSION_INFO" | grep "Xcode" | sed 's/Xcode \([0-9]*\).*/\1/')
-          echo "Detected Xcode major version: $XCODE_MAJOR_VERSION"
-          if [ -z "$XCODE_MAJOR_VERSION" ] || [ "$XCODE_MAJOR_VERSION" -lt 15 ]; then
-             echo "Warning or Error: Could not detect valid Xcode version >= 15. Using default."
-             # exit 1 # Consider if this should be fatal
-          fi
-          /usr/bin/clang --version
+          xcodebuild -version
 
       # Linux Specific Setup
       - name: Setup Environment (Linux - Clang ${{ matrix.clang_version }})
@@ -153,6 +177,7 @@ jobs:
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           CURRENT_OS_TYPE="${{ matrix.os_type }}"
+          # 设置编译器路径
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             export CC="${{ steps.setup-env-macos.outputs.cc_path }}"
             export CXX="${{ steps.setup-env-macos.outputs.cxx_path }}"
@@ -170,12 +195,29 @@ jobs:
           echo "Using CXX: $CXX"; $CXX --version
           echo "--- Build Configuration ---"
           echo "Using BUILD_PRESET: $BUILD_PRESET"
-          echo "VCPKG_DOWNLOADS set to: $VCPKG_DOWNLOADS" # Verify env var is accessible
-          
+          echo "Verifying VCPKG_DOWNLOADS env var before build: $VCPKG_DOWNLOADS" # Verify env var
+
+          # 再次强制检查并创建 VCPKG_DOWNLOADS 目录 (针对 Linux 问题)
+          if [ -n "$VCPKG_DOWNLOADS" ]; then
+            if [ ! -d "$VCPKG_DOWNLOADS" ]; then
+              echo "Warning: Directory $VCPKG_DOWNLOADS does not exist. Attempting to create it now."
+              mkdir -p "$VCPKG_DOWNLOADS"
+              if [ ! -d "$VCPKG_DOWNLOADS" ]; then
+                 echo "Error: Failed to create directory $VCPKG_DOWNLOADS even on second attempt."; exit 1
+              fi
+            else
+              echo "Verified directory $VCPKG_DOWNLOADS exists."
+            fi
+            echo "Permissions for $VCPKG_DOWNLOADS:"; ls -ld "$VCPKG_DOWNLOADS"
+          else
+            echo "Warning: VCPKG_DOWNLOADS environment variable is not set."
+          fi
+
           echo "--- Starting Ladybird Build ---"
           ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
           
+          # 确定产物子路径
           ACTUAL_BUILD_SUBDIR="$BUILD_PRESET"
           if [ "$BUILD_PRESET" = "default" ]; then
             if [ -d "Build/release" ] && [ ! -d "Build/default" ]; then
