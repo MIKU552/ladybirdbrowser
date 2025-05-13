@@ -80,6 +80,11 @@ jobs:
           LLVM_PACKAGE_NAME: ${{ matrix.llvm_package }}
         run: |
           brew update --quiet
+          # Ensure jq is available for the next step
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found, attempting to install with brew..."
+            brew install jq || { echo "Failed to install jq"; exit 1; }
+          fi
           echo "Installing macOS dependencies: autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config $LLVM_PACKAGE_NAME"
           brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config "$LLVM_PACKAGE_NAME"
           echo "--- Verifying installed tools (CMake, Ninja) ---"
@@ -102,31 +107,20 @@ jobs:
         if: matrix.os_type == 'macos'
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
-          # Ensure jq is available (GitHub macOS runners usually have it)
-          if ! command -v jq &> /dev/null; then
-            echo "jq not found, attempting to install with brew..."
-            brew install jq || { echo "Failed to install jq"; exit 1; }
-          fi
-          
-          TARGET_PRESET_NAME_TO_MODIFY="${{ env.BUILD_PRESET_NAME }}" # This is 'default', 'Debug', etc.
-          OSX_DEPLOYMENT_TARGET="12.0" # Target macOS Monterey
+          TARGET_PRESET_NAME_TO_MODIFY="${{ env.BUILD_PRESET_NAME }}"
+          OSX_DEPLOYMENT_TARGET="14.0" # Updated to macOS 14.0
 
           echo "Modifying CMakePresets.json: Setting CMAKE_OSX_DEPLOYMENT_TARGET to $OSX_DEPLOYMENT_TARGET for preset '$TARGET_PRESET_NAME_TO_MODIFY'"
-          
-          # Create a temporary file for the modified JSON
           cp CMakePresets.json CMakePresets.json.orig
           if ! jq --arg preset_name "$TARGET_PRESET_NAME_TO_MODIFY" --arg deploy_target "$OSX_DEPLOYMENT_TARGET" \
             '(.configurePresets[] | select(.name == $preset_name).cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET) = $deploy_target' \
             CMakePresets.json.orig > CMakePresets.json; then
-              echo "jq command failed to modify CMakePresets.json. Restoring original."
-              mv CMakePresets.json.orig CMakePresets.json # Restore on failure
-              exit 1
+              echo "jq command failed to modify CMakePresets.json for deployment target. Restoring original."
+              mv CMakePresets.json.orig CMakePresets.json; exit 1
           fi
-          
-          echo "Successfully modified CMakePresets.json."
+          echo "Successfully modified CMakePresets.json for deployment target."
           echo "Verifying change for preset '$TARGET_PRESET_NAME_TO_MODIFY':"
           jq ".configurePresets[] | select(.name == \"$TARGET_PRESET_NAME_TO_MODIFY\") .cacheVariables.CMAKE_OSX_DEPLOYMENT_TARGET" CMakePresets.json
-
 
       - name: Select and Verify Xcode version (macOS - Informational)
         if: matrix.os_type == 'macos'
@@ -154,7 +148,7 @@ jobs:
         run: |
           sudo apt-get update -y -q
           sudo apt-get install -y -q --no-install-recommends \
-            wget gpg ca-certificates software-properties-common coreutils apt-utils curl jq # Added jq for consistency
+            wget gpg ca-certificates software-properties-common coreutils apt-utils curl jq # Added jq
 
           INSTALLED_CMAKE_VERSION=$(cmake --version 2>/dev/null | head -n1 | sed 's/cmake version //g' || echo "0.0.0")
           echo "Initial CMake version: $INSTALLED_CMAKE_VERSION"
@@ -188,19 +182,73 @@ jobs:
           echo "Clang version used:"; /usr/bin/clang-$CLANG_VERSION_TO_INSTALL --version
           echo "Ninja version:"; ninja --version
 
+      - name: Modify CMakePresets.json for Linux C++ Standard Library
+        if: matrix.os_type == 'linux'
+        working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
+        run: |
+          TARGET_PRESET_NAME_TO_MODIFY="${{ env.BUILD_PRESET_NAME }}"
+          STDLIB_FLAG="-stdlib=libc++"
+
+          echo "Modifying CMakePresets.json: Adding '$STDLIB_FLAG' to CMAKE_C_FLAGS and CMAKE_CXX_FLAGS for preset '$TARGET_PRESET_NAME_TO_MODIFY'"
+          cp CMakePresets.json CMakePresets.json.orig
+
+          # Helper function to update flags (ensure it's defined or inline the logic)
+          # Inlining for simplicity here:
+          update_preset_flags() {
+            _preset_name="$1"
+            _flag_to_add="$2"
+            _flags_var_name="$3"
+            _json_file="CMakePresets.json" # Operate on the current file
+
+            # Check if the preset and cacheVariables exist, create if not
+            # Ensure path to .cacheVariables.FLAGS_VAR exists
+            jq \
+              --arg preset "$_preset_name" \
+              --arg flag "$_flag_to_add" \
+              --arg flags_var "$_flags_var_name" \
+              '
+                ( .configurePresets[] | select(.name == $preset) ) as $p |
+                if $p == null then
+                  .
+                else
+                  # Ensure cacheVariables exists
+                  ( $p | if .cacheVariables == null then .cacheVariables = {} else . end) as $p_with_cv |
+                  ( $p_with_cv.cacheVariables[$flags_var] // "" ) as $current_flags |
+                  if ($current_flags | contains($flag)) then
+                    . # Flag already exists
+                  else
+                    ($current_flags + " " + $flag | sub("^ +"; "") | sub(" +$"; "") | gsub("  +"; " ")) as $new_flags |
+                    # Update the original structure
+                    (.configurePresets[] | select(.name == $preset).cacheVariables[$flags_var]) = $new_flags
+                  end
+                end
+              ' CMakePresets.json.orig > "$_json_file" || { echo "jq command failed for $_flags_var_name"; exit 1; }
+          }
+
+          update_preset_flags "$TARGET_PRESET_NAME_TO_MODIFY" "$STDLIB_FLAG" "CMAKE_C_FLAGS"
+          # Create new .orig for the next modification if the first succeeded
+          cp CMakePresets.json CMakePresets.json.orig 
+          update_preset_flags "$TARGET_PRESET_NAME_TO_MODIFY" "$STDLIB_FLAG" "CMAKE_CXX_FLAGS"
+          
+          echo "Successfully modified CMakePresets.json for stdlib flags."
+          echo "Verifying changes for preset '$TARGET_PRESET_NAME_TO_MODIFY':"
+          jq ".configurePresets[] | select(.name == \"$TARGET_PRESET_NAME_TO_MODIFY\") .cacheVariables" CMakePresets.json
+
+
       # Common Build Step
       - name: Configure and Build Ladybird
         id: build-ladybird
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           CURRENT_OS_TYPE="${{ matrix.os_type }}"
-          # EFFECTIVE_BUILD_PRESET_FOR_SCRIPT will be the same as the input/default env.BUILD_PRESET_NAME
-          # because we modified CMakePresets.json directly.
+          # EFFECTIVE_BUILD_PRESET_FOR_SCRIPT will be the same as env.BUILD_PRESET_NAME
+          # because we modified CMakePresets.json directly for the target preset.
           EFFECTIVE_BUILD_PRESET_FOR_SCRIPT="${{ env.BUILD_PRESET_NAME }}"
 
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             export CC="${{ steps.setup-macos-compiler.outputs.cc_path }}"
             export CXX="${{ steps.setup-macos-compiler.outputs.cxx_path }}"
+            # Verification for macOS CC/CXX
             if [ -z "$CC" ] || [ -z "$CXX" ]; then echo "Error: CC or CXX is not set for macOS."; exit 1; fi
             EXPECTED_LLVM_PREFIX=$(brew --prefix "${{ matrix.llvm_package }}")
             if [[ "$CC" != "$EXPECTED_LLVM_PREFIX/bin/clang" ]] || [[ "$CXX" != "$EXPECTED_LLVM_PREFIX/bin/clang++" ]]; then
@@ -220,10 +268,12 @@ jobs:
           echo "Using CXX: $CXX"; $CXX --version || { echo "Error: CXX version check failed."; exit 1; }
           
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
-            echo "macOS Deployment Target is intended to be set via modified CMakePresets.json for preset '$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT'"
+            echo "macOS Deployment Target is intended to be set to 14.0 via modified CMakePresets.json for preset '$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT'"
+          elif [ "$CURRENT_OS_TYPE" = "linux" ]; then
+            echo "Linux C/CXX flags are intended to include -stdlib=libc++ via modified CMakePresets.json for preset '$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT'"
           fi
-          echo "--- CMake Version (tool) ---"; cmake --version # This reports version in PATH before ladybird.sh PATH mods
-          echo "--- Ninja Version (tool) ---"; ninja --version
+          echo "--- CMake Version (tool in workflow PATH) ---"; cmake --version
+          echo "--- Ninja Version (tool in workflow PATH) ---"; ninja --version
           echo "--- Build Configuration ---"
           echo "Using EFFECTIVE_BUILD_PRESET_FOR_SCRIPT: $EFFECTIVE_BUILD_PRESET_FOR_SCRIPT"
           echo "Verifying VCPKG_DOWNLOADS env var: $VCPKG_DOWNLOADS"
@@ -231,7 +281,6 @@ jobs:
           echo "Permissions for $VCPKG_DOWNLOADS:"; ls -ld "$VCPKG_DOWNLOADS"
 
           echo "--- Starting Ladybird Build ---"
-          # ladybird.sh uses BUILD_PRESET env var. We set it to the (potentially modified by input) preset name.
           BUILD_PRESET="$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
           
