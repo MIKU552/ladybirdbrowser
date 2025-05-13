@@ -1,38 +1,22 @@
-name: Build Ladybird from External Workflow
+name: Build Ladybird Browser
 
 on:
   push:
-    branches: [ main ] # Or whatever trigger you prefer for your separate repository
+    branches: [ main ]
   pull_request:
-    branches: [ main ] # Or whatever trigger you prefer for your separate repository
-
-env:
-  BUILD_DIR: Build/release
+    branches: [ main ]
 
 jobs:
-  build_linux:
-    name: Build on Linux (Ubuntu)
+  build-linux:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout Ladybird repository
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        repository: 'LadybirdBrowser/ladybird'
-        submodules: 'recursive'
-        # path: 'ladybird_code' # Optional: checkout into a subfolder. If used, adjust script paths.
+        repository: LadybirdBrowser/ladybird
+        submodules: 'recursive' # 如果您的项目包含子模块，请保留此行
 
-    - name: Diagnostic: List files after checkout
-      run: |
-        echo "Current directory: $(pwd)"
-        echo "Workspace root contents ( ${{ github.workspace }} ):"
-        ls -la ${{ github.workspace }}
-        echo "Looking for Meta directory:"
-        ls -la ${{ github.workspace }}/Meta
-        echo "Attempting to find ladybird.sh:"
-        find ${{ github.workspace }} -name ladybird.sh -ls
-      shell: bash
-
-    - name: Install base dependencies for Ladybird
+    - name: Install Dependencies (Ubuntu)
       run: |
         sudo apt-get update
         sudo apt-get install -y \
@@ -41,6 +25,7 @@ jobs:
           automake \
           build-essential \
           ccache \
+          cmake \
           curl \
           fonts-liberation2 \
           git \
@@ -54,85 +39,53 @@ jobs:
           tar \
           unzip \
           zip \
-          libpulse-dev
-      shell: bash # Explicitly set shell
-
-    - name: Install CMake (3.25+ from Kitware)
-      run: |
+          libpulse-dev  # 根据 BuildInstructionsLadybird.md 推荐安装 PulseAudio 开发包
+        # 从 Kitware APT 仓库安装 CMake 3.25+ (详情请参阅 BuildInstructionsLadybird.md)
         wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
         echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/kitware.list
-        sudo apt-get update -y
+        sudo apt-get update
         sudo apt-get install -y cmake
-        cmake --version
-      shell: bash # Explicitly set shell
-
-    - name: Install Clang (Clang 19 from LLVM repo)
-      run: |
+        # 安装支持 C++23 的编译器 (推荐 Clang 17+，具体参考 BuildInstructionsLadybird.md)
         sudo wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
         echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.key] https://apt.llvm.org/$(lsb_release -sc)/ llvm-toolchain-$(lsb_release -sc)-19 main" | sudo tee -a /etc/apt/sources.list.d/llvm.list
-        sudo apt-get update -y
-        sudo apt-get install -y clang-19 clangd-19 clang-tools-19 clang-format-19 clang-tidy-19 lld-19
-      shell: bash # Explicitly set shell
+        sudo apt-get update
+        sudo apt-get install -y clang-19 lld-19
 
-    - name: Build Ladybird using ladybird.sh
-      shell: bash
+    - name: Build Ladybird (Linux)
+      env:
+        CC: clang-19
+        CXX: clang++-19
+        # BUILD_PRESET 可以根据需求更改为 Distribution_CI, default 等 (参考 CMakePresets.json)
+        BUILD_PRESET: CI
       run: |
-        echo "Attempting to run ladybird.sh from: ${{ github.workspace }}/Meta/ladybird.sh"
-        chmod +x ${{ github.workspace }}/Meta/ladybird.sh
-        ${{ github.workspace }}/Meta/ladybird.sh build ladybird # Adjust if 'ladybird' is not the correct target or if no target is needed.
+        ./Meta/ladybird.sh build
 
-    - name: Archive Linux build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ladybird-linux
-        path: |
-          ${{ github.workspace }}/${{ env.BUILD_DIR }}/bin/Ladybird
-          # Add other executables or relevant files here if needed
-        if-no-files-found: error
-
-  build_macos:
-    name: Build on macOS
+  build-macos:
     runs-on: macos-latest
     steps:
-    - name: Checkout Ladybird repository
+    - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        repository: 'LadybirdBrowser/ladybird'
-        submodules: 'recursive'
-        # path: 'ladybird_code' # Optional: checkout into a subfolder. If used, adjust script paths.
+        repository: LadybirdBrowser/ladybird
+        submodules: 'recursive' # 如果您的项目包含子模块，请保留此行
 
-    - name: Diagnostic: List files after checkout
+    - name: Install Dependencies (macOS)
       run: |
-        echo "Current directory: $(pwd)"
-        echo "Workspace root contents ( ${{ github.workspace }} ):"
-        ls -la ${{ github.workspace }}
-        echo "Looking for Meta directory:"
-        ls -la ${{ github.workspace }}/Meta
-        echo "Attempting to find ladybird.sh:"
-        find ${{ github.workspace }} -name ladybird.sh -ls
-      shell: bash
+        brew install \
+          autoconf \
+          autoconf-archive \
+          automake \
+          ccache \
+          cmake \
+          nasm \
+          ninja \
+          pkg-config \
+          qt6 # 为 Qt UI 安装 qt6 (详情请参阅 BuildInstructionsLadybird.md)；如果仅构建 AppKit 版本则可省略
+        # 确保已选择 Xcode 或 Homebrew LLVM (此处默认使用 Xcode Clang)
 
-    - name: Install Xcode command line tools (if not pre-installed)
-      run: xcode-select --install || true # Allow to continue if already installed
-      shell: bash
-
-    - name: Install essential macOS dependencies via Homebrew
+    - name: Build Ladybird (macOS)
+      env:
+        # BUILD_PRESET 可以根据需求更改为 Distribution_CI, default 等 (参考 CMakePresets.json)
+        BUILD_PRESET: CI
       run: |
-        brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config
-      shell: bash
-
-    - name: Build Ladybird using ladybird.sh (with Xcode Clang)
-      shell: bash
-      run: |
-        echo "Attempting to run ladybird.sh from: ${{ github.workspace }}/Meta/ladybird.sh"
-        chmod +x ${{ github.workspace }}/Meta/ladybird.sh
-        ${{ github.workspace }}/Meta/ladybird.sh build ladybird # Adjust if 'ladybird' is not the correct target or if no target is needed.
-
-    - name: Archive macOS build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ladybird-macos
-        path: |
-          ${{ github.workspace }}/${{ env.BUILD_DIR }}/bin/Ladybird.app
-          # Add other executables or relevant files here if needed
-        if-no-files-found: error
+        ./Meta/ladybird.sh build
