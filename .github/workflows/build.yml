@@ -1,0 +1,97 @@
+name: Build Ladybird
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  # Common build directory as suggested by ladybird.sh and build instructions
+  BUILD_DIR: Build/release
+
+jobs:
+  build_linux:
+    name: Build on Linux (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive' # As a general precaution for complex projects
+
+    - name: Install base dependencies for Ladybird
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y autoconf autoconf-archive automake build-essential ccache curl \
+                                fonts-liberation2 git libgl1-mesa-dev nasm ninja-build pkg-config \
+                                qt6-base-dev qt6-tools-dev-tools qt6-wayland tar unzip zip libpulse-dev #
+        # qt6-multimedia-dev is an alternative to libpulse-dev
+
+    - name: Install CMake (3.25+ from Kitware)
+      run: |
+        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null #
+        echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/kitware.list #
+        sudo apt-get update -y
+        sudo apt-get install -y cmake #
+        cmake --version
+
+    - name: Install Clang (Clang 19 from LLVM repo)
+      run: |
+        sudo wget -O /usr/share/keyrings/llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key #
+        echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg.key] https://apt.llvm.org/$(lsb_release -sc)/ llvm-toolchain-$(lsb_release -sc)-19 main" | sudo tee -a /etc/apt/sources.list.d/llvm.list #
+        sudo apt-get update -y
+        sudo apt-get install -y clang-19 clangd-19 clang-tools-19 clang-format-19 clang-tidy-19 lld-19 #
+        # Ensure Clang 19 is used if ladybird.sh doesn't automatically select it.
+        # One way is to set CC and CXX, though the script might handle this.
+        # echo "CC=clang-19" >> $GITHUB_ENV
+        # echo "CXX=clang++-19" >> $GITHUB_ENV
+
+    - name: Build Ladybird using ladybird.sh
+      shell: bash
+      run: |
+        # The build instructions indicate ./Meta/ladybird.sh run builds and runs.
+        # For CI, we typically just want to build. The docs also mention `./Meta/ladybird.sh build`
+        # Using 'build ladybird' as the target for the script.
+        ./Meta/ladybird.sh build ladybird # Adjust if 'ladybird' is not the correct target or if no target is needed.
+
+    - name: Archive Linux build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ladybird-linux
+        path: |
+          ${{ env.BUILD_DIR }}/bin/Ladybird
+          # Add other executables or relevant files here if needed
+        if-no-files-found: error # Fails the workflow if no files are found at the specified path
+
+  build_macos:
+    name: Build on macOS
+    runs-on: macos-latest # Should provide Xcode 15+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: Install Xcode command line tools (if not pre-installed)
+      run: xcode-select --install || true # Allow to continue if already installed
+
+    - name: Install essential macOS dependencies via Homebrew
+      run: |
+        brew install autoconf autoconf-archive automake ccache cmake nasm ninja pkg-config #
+        # llvm and qt6 are removed as per discussion to rely on Xcode's Clang and AppKit default
+
+    - name: Build Ladybird using ladybird.sh (with Xcode Clang)
+      shell: bash
+      # No CC/CXX override needed, should use default Xcode Clang
+      run: |
+        ./Meta/ladybird.sh build ladybird # Adjust if 'ladybird' is not the correct target or if no target is needed.
+
+    - name: Archive macOS build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ladybird-macos
+        path: |
+          ${{ env.BUILD_DIR }}/bin/Ladybird.app
+          # Add other executables or relevant files here if needed
+        if-no-files-found: error
