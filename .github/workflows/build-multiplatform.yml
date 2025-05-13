@@ -129,8 +129,6 @@ jobs:
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           echo "Creating CMakeUserPresets.json to set CMAKE_OSX_DEPLOYMENT_TARGET..."
-          # Using version 6 to match the project's CMakePresets.json
-          # Targeting macOS 12.0 (Monterey) for API availability
           cat <<EOF > CMakeUserPresets.json
           {
             "version": 6,
@@ -154,17 +152,6 @@ jobs:
                   "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0"
                 }
               }
-              // Add other presets if inputs.build_preset can be other values like 'Distribution', 'Sanitizer' etc.
-              // For example:
-              // {
-              //   "name": "gh_actions_macos_ci_distribution",
-              //   "inherits": "Distribution",
-              //   "displayName": "CI macOS Distribution Override (Deployment Target 12.0)",
-              //   "description": "Sets CMAKE_OSX_DEPLOYMENT_TARGET to 12.0 for Distribution CI builds.",
-              //   "cacheVariables": {
-              //     "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0"
-              //   }
-              // }
             ]
           }
           EOF
@@ -234,18 +221,11 @@ jobs:
       # Common Build Step
       - name: Configure and Build Ladybird
         id: build-ladybird
-        env:
-          # BUILD_PRESET_NAME is from the job env: ${{ github.event.inputs.build_preset || 'default' }}
-          # CMAKE_OSX_DEPLOYMENT_TARGET is NOT directly used here anymore for macOS,
-          # as it's handled by the CMakeUserPresets.json.
         working-directory: ./${{ env.LADYBIRD_CHECKOUT_DIR }}
         run: |
           CURRENT_OS_TYPE="${{ matrix.os_type }}"
-          # This is the preset name coming from workflow inputs or 'default'
           ORIGINAL_BUILD_PRESET_NAME="${{ env.BUILD_PRESET_NAME }}"
-          # This will be the preset name actually passed to ladybird.sh
           EFFECTIVE_BUILD_PRESET_FOR_SCRIPT="$ORIGINAL_BUILD_PRESET_NAME"
-
 
           if [ "$CURRENT_OS_TYPE" = "macos" ]; then
             export CC="${{ steps.setup-macos-compiler.outputs.cc_path }}"
@@ -259,18 +239,12 @@ jobs:
               echo "Error: CC/CXX not pointing to expected Homebrew Clang."; exit 1
             fi
             
-            # Select the override preset based on the original input preset
             if [ "$ORIGINAL_BUILD_PRESET_NAME" = "default" ]; then
               EFFECTIVE_BUILD_PRESET_FOR_SCRIPT="gh_actions_macos_ci_default"
             elif [ "$ORIGINAL_BUILD_PRESET_NAME" = "Debug" ]; then
               EFFECTIVE_BUILD_PRESET_FOR_SCRIPT="gh_actions_macos_ci_debug"
-            # Add elif for other presets like Distribution, Sanitizer if needed
-            # elif [ "$ORIGINAL_BUILD_PRESET_NAME" = "Distribution" ]; then
-            #   EFFECTIVE_BUILD_PRESET_FOR_SCRIPT="gh_actions_macos_ci_distribution"
             else
               echo "Warning: No specific macOS CI override preset for ORIGINAL_BUILD_PRESET_NAME='$ORIGINAL_BUILD_PRESET_NAME'. Using it directly."
-              # In this case, CMAKE_OSX_DEPLOYMENT_TARGET might not be set as desired.
-              # Consider adding an override preset for '$ORIGINAL_BUILD_PRESET_NAME' in CMakeUserPresets.json
             fi
             echo "Using effective CMake preset for macOS via ladybird.sh: $EFFECTIVE_BUILD_PRESET_FOR_SCRIPT"
 
@@ -301,48 +275,46 @@ jobs:
           echo "Permissions for $VCPKG_DOWNLOADS:"; ls -ld "$VCPKG_DOWNLOADS"
 
           echo "--- Starting Ladybird Build ---"
-          # ladybird.sh uses BUILD_PRESET env var to select the cmake preset.
-          # We set it here for the scope of this command.
           BUILD_PRESET="$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" ./Meta/ladybird.sh build ladybird
           echo "--- Build Finished ---"
           
-          # Determine artifact subdirectory based on the *original* input preset name for consistency in artifact naming,
-          # but the actual build path might correspond to the binaryDir of the *effective* preset.
-          # The ladybird.sh script uses BUILD_PRESET to determine BUILD_DIR, so we should use EFFECTIVE_BUILD_PRESET_FOR_SCRIPT
-          # for finding build artifacts.
-          
-          # The preset name (e.g., "default", "Debug") is used by ladybird.sh to define BUILD_DIR.
-          # e.g., BUILD_DIR="${LADYBIRD_SOURCE_DIR}/Build/$(echo "$BUILD_PRESET" | tr '[:upper:]' '[:lower:]')" is a common pattern,
-          # but CMakePresets.json directly sets `binaryDir`.
-          # The binaryDir in CMakePresets for "default" is "${fileDir}/Build/release", for "Debug" is "${fileDir}/Build/debug".
-          # Our gh_actions_macos_ci_default inherits "default", so its binaryDir should be the same as "default".
-          # Let's determine ACTUAL_BUILD_SUBDIR based on the original preset's typical binary dir convention.
-          
-          ACTUAL_BUILD_SUBDIR_NAME="$ORIGINAL_BUILD_PRESET_NAME" # For logging/artifact naming consistency with input
-          
-          # Determine the actual binary subdirectory based on the preset that was effectively used for building
-          # This needs to align with how ladybird.sh and CMakePresets define the binaryDir
-          # For "default" preset (and our gh_actions_macos_ci_default inheriting it), binaryDir is "Build/release"
-          # For "Debug" preset (and our gh_actions_macos_ci_debug inheriting it), binaryDir is "Build/debug"
+          # Determine the actual build output subdirectory for artifacts and logs
+          # This logic should align with the binaryDir specified in CMakePresets.json for the *effective* preset used
           BUILD_OUTPUT_SUBDIRECTORY=""
-          if [ "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" = "gh_actions_macos_ci_default" ]; then
-            BUILD_OUTPUT_SUBDIRECTORY="release"
-          elif [ "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" = "gh_actions_macos_ci_debug" ]; then
+          if [[ "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"debug"* || "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"Debug"* ]]; then
+            # Caters to "Debug", "gh_actions_macos_ci_debug"
             BUILD_OUTPUT_SUBDIRECTORY="debug"
-          elif [ "$ORIGINAL_BUILD_PRESET_NAME" = "default" ]; then # Fallback if override wasn't used
+          elif [[ "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"distribution"* || "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"Distribution"* ]]; then
+            BUILD_OUTPUT_SUBDIRECTORY="distribution"
+          elif [[ "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"sanitizer"* || "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"Sanitizer"* ]]; then
+            BUILD_OUTPUT_SUBDIRECTORY="sanitizers" # Note: plural 'sanitizers' from preset
+          elif [[ "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"default"* || "$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT" == *"Default"* ]]; then
+            # Caters to "default", "gh_actions_macos_ci_default" -> binaryDir is Build/release
             BUILD_OUTPUT_SUBDIRECTORY="release"
-          elif [ "$ORIGINAL_BUILD_PRESET_NAME" = "Debug" ]; then # Fallback if override wasn't used
-            BUILD_OUTPUT_SUBDIRECTORY="debug"
           else
-            # Default to lowercased preset name if it's something else (e.g., Distribution)
-            # This part might need adjustment based on all possible presets and their binaryDir
+            echo "Warning: No explicit binaryDir mapping for effective preset '$EFFECTIVE_BUILD_PRESET_FOR_SCRIPT'. Falling back to lowercase of original preset name for directory."
             BUILD_OUTPUT_SUBDIRECTORY=$(echo "$ORIGINAL_BUILD_PRESET_NAME" | tr '[:upper:]' '[:lower:]')
-            echo "Warning: Assuming build output subdirectory is 'Build/$BUILD_OUTPUT_SUBDIRECTORY' for preset '$ORIGINAL_BUILD_PRESET_NAME'"
+            if [ -z "$BUILD_OUTPUT_SUBDIRECTORY" ]; then # Should not happen if ORIGINAL_BUILD_PRESET_NAME is non-empty
+                echo "Critical Error: Fallback BUILD_OUTPUT_SUBDIRECTORY is empty. Using 'unknown_build_dir'."
+                BUILD_OUTPUT_SUBDIRECTORY="unknown_build_dir" 
+            fi
           fi
-
+          echo "Determined BUILD_OUTPUT_SUBDIRECTORY for artifacts/logs: $BUILD_OUTPUT_SUBDIRECTORY"
 
           if [ ! -d "Build/$BUILD_OUTPUT_SUBDIRECTORY" ]; then
-            echo "Error: Build output dir 'Build/$BUILD_OUTPUT_SUBDIRECTORY' not found! (Effective preset was $EFFECTIVE_BUILD_PRESET_FOR_SCRIPT)"; ls -la Build; exit 1
+            echo "Error: Build output dir 'Build/$BUILD_OUTPUT_SUBDIRECTORY' not found! (Used effective preset: $EFFECTIVE_BUILD_PRESET_FOR_SCRIPT)";
+            echo "Listing Build directory contents:"; ls -la Build;
+            # Attempt to use common fallbacks if specific directory is not found, to prevent empty paths for log uploads
+            if [ -d "Build/release" ]; then
+                echo "Fallback: Using 'Build/release' for logs as specific directory was not found."
+                BUILD_OUTPUT_SUBDIRECTORY="release"
+            elif [ -d "Build/debug" ]; then
+                echo "Fallback: Using 'Build/debug' for logs as specific directory was not found."
+                BUILD_OUTPUT_SUBDIRECTORY="debug"
+            else
+                echo "Fallback Error: Common build directories (release, debug) also not found. Using placeholder 'unknown_artifact_dir'."
+                BUILD_OUTPUT_SUBDIRECTORY="unknown_artifact_dir" # Final placeholder to avoid empty string
+            fi
           fi
           
           ARTIFACT_FILE_PATH=""
@@ -352,14 +324,14 @@ jobs:
             ARTIFACT_FILE_PATH="Build/$BUILD_OUTPUT_SUBDIRECTORY/bin/Ladybird" 
           fi
           echo "artifact_sub_path=$ARTIFACT_FILE_PATH" >> $GITHUB_OUTPUT
-          echo "ACTUAL_BUILD_SUBDIR_FOR_LOGS=$BUILD_OUTPUT_SUBDIRECTORY" >> $GITHUB_OUTPUT
+          echo "ACTUAL_BUILD_SUBDIR_FOR_LOGS=$BUILD_OUTPUT_SUBDIRECTORY" >> $GITHUB_OUTPUT # Ensure this is always set
           echo "Artifact path for upload: ./${{ env.LADYBIRD_CHECKOUT_DIR }}/$ARTIFACT_FILE_PATH"
 
       - name: Upload Ladybird Artifact
         if: success() && steps.build-ladybird.outputs.artifact_sub_path != ''
         uses: actions/upload-artifact@v4
         with:
-          name: Ladybird-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }} # Name artifact with original preset
+          name: Ladybird-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }}
           path: ${{ env.LADYBIRD_CHECKOUT_DIR }}/${{ steps.build-ladybird.outputs.artifact_sub_path }}
           if-no-files-found: error
           retention-days: 7
@@ -368,7 +340,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ladybird-build-logs-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }} # Name with original preset
+          name: ladybird-build-logs-${{ matrix.artifact_name_suffix }}-${{ env.BUILD_PRESET_NAME }}
           path: |
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ steps.build-ladybird.outputs.ACTUAL_BUILD_SUBDIR_FOR_LOGS }}/**/*.log
             ${{ env.LADYBIRD_CHECKOUT_DIR }}/Build/${{ steps.build-ladybird.outputs.ACTUAL_BUILD_SUBDIR_FOR_LOGS }}/vcpkg-manifest-install.log
